@@ -4,10 +4,10 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
 import database
+import json
 
 app = FastAPI(title="E2EE Collaborative Workspace API")
 
-# Enable CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,7 +23,6 @@ def get_db():
     finally:
         db.close()
 
-# Pydantic Schemas
 class DocCreate(BaseModel):
     id: str
     title: str
@@ -42,6 +41,7 @@ class ConnectionManager:
         if doc_id not in self.active_connections:
             self.active_connections[doc_id] = []
         self.active_connections[doc_id].append(websocket)
+        await self.broadcast_presence(doc_id)
 
     def disconnect(self, websocket: WebSocket, doc_id: str):
         if doc_id in self.active_connections:
@@ -49,6 +49,16 @@ class ConnectionManager:
                 self.active_connections[doc_id].remove(websocket)
             if not self.active_connections[doc_id]:
                 del self.active_connections[doc_id]
+
+    async def broadcast_presence(self, doc_id: str):
+        if doc_id in self.active_connections:
+            count = len(self.active_connections[doc_id])
+            presence_event = json.dumps({
+                "type": "presence",
+                "count": count
+            })
+            for connection in self.active_connections[doc_id]:
+                await connection.send_text(presence_event)
 
     async def broadcast(self, message: str, doc_id: str, sender: WebSocket):
         if doc_id in self.active_connections:
@@ -58,7 +68,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# --- REST Endpoints for Document Management ---
+# --- REST Endpoints ---
 
 @app.get("/api/documents", response_model=List[DocResponse])
 def list_documents(db: Session = Depends(get_db)):
@@ -88,7 +98,7 @@ def delete_document(doc_id: str, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success", "message": f"Document {doc_id} deleted"}
 
-# --- WebSocket Relay + Persistence ---
+# --- WebSocket Endpoint ---
 
 @app.websocket("/ws/doc/{doc_id}")
 async def websocket_endpoint(websocket: WebSocket, doc_id: str, db: Session = Depends(get_db)):
@@ -96,13 +106,20 @@ async def websocket_endpoint(websocket: WebSocket, doc_id: str, db: Session = De
     try:
         while True:
             data = await websocket.receive_text()
-            # Broadcast ciphertext to all other active connections for this document
+            
+            # Relay structured payload to other peers
             await manager.broadcast(data, doc_id, sender=websocket)
             
-            # Persist latest encrypted payload to database
-            doc = db.query(database.Document).filter(database.Document.id == doc_id).first()
-            if doc:
-                doc.encrypted_content = data
-                db.commit()
+            # Parse event frame if text content is updated
+            try:
+                parsed = json.loads(data)
+                if parsed.get("type") == "doc_update" and "payload" in parsed:
+                    doc = db.query(database.Document).filter(database.Document.id == doc_id).first()
+                    if doc:
+                        doc.encrypted_content = parsed["payload"]
+                        db.commit()
+            except Exception:
+                pass
     except WebSocketDisconnect:
         manager.disconnect(websocket, doc_id)
+        await manager.broadcast_presence(doc_id)

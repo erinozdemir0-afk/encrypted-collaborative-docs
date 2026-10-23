@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { Lock, ShieldCheck, Copy, Plus, FileText, Folder, Trash2 } from "lucide-react";
+import { Lock, ShieldCheck, Copy, Plus, FileText, Folder, Trash2, Users } from "lucide-react";
 import {
   generateSymmetricKey,
   exportKeyToBase64,
@@ -15,6 +15,7 @@ export default function App() {
   const [activeDocId, setActiveDocId] = useState(null);
   const [cryptoKey, setCryptoKey] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [activeUsersCount, setActiveUsersCount] = useState(1);
   const [lastRawPayload, setLastRawPayload] = useState("");
   const [copied, setCopied] = useState(false);
   const [newDocTitle, setNewDocTitle] = useState("");
@@ -22,7 +23,6 @@ export default function App() {
   const wsRef = useRef(null);
   const isLocalUpdateRef = useRef(false);
 
-  // Fetch all documents from REST API on mount
   const fetchDocuments = async () => {
     try {
       const res = await fetch("http://127.0.0.1:8000/api/documents");
@@ -40,7 +40,6 @@ export default function App() {
     fetchDocuments();
   }, []);
 
-  // Handle document key generation/loading isolated per activeDocId
   useEffect(() => {
     if (!activeDocId) return;
 
@@ -76,7 +75,6 @@ export default function App() {
     setupDocumentKey();
   }, [activeDocId]);
 
-  // TipTap Editor instance
   const editor = useEditor({
     extensions: [StarterKit],
     content: "<p>Select or create a document to begin editing...</p>",
@@ -90,12 +88,17 @@ export default function App() {
         const html = editor.getHTML();
         const encryptedPayload = await encryptMessage(html, cryptoKey);
         setLastRawPayload(encryptedPayload);
-        wsRef.current.send(encryptedPayload);
+
+        const frame = JSON.stringify({
+          type: "doc_update",
+          payload: encryptedPayload,
+        });
+
+        wsRef.current.send(frame);
       }
     },
   });
 
-  // Load document content & establish WebSocket connection
   useEffect(() => {
     if (!activeDocId || !cryptoKey || !editor) return;
 
@@ -136,13 +139,19 @@ export default function App() {
     ws.onclose = () => setIsConnected(false);
 
     ws.onmessage = async (event) => {
-      setLastRawPayload(event.data);
       try {
-        const decryptedHtml = await decryptMessage(event.data, cryptoKey);
-        isLocalUpdateRef.current = true;
-        editor.commands.setContent(decryptedHtml, false);
+        const parsed = JSON.parse(event.data);
+
+        if (parsed.type === "presence") {
+          setActiveUsersCount(parsed.count);
+        } else if (parsed.type === "doc_update") {
+          setLastRawPayload(parsed.payload);
+          const decryptedHtml = await decryptMessage(parsed.payload, cryptoKey);
+          isLocalUpdateRef.current = true;
+          editor.commands.setContent(decryptedHtml, false);
+        }
       } catch (err) {
-        console.error("Decryption failed:", err);
+        console.error("Message parsing/decryption failed:", err);
       }
     };
 
@@ -151,7 +160,6 @@ export default function App() {
     };
   }, [activeDocId, cryptoKey, editor]);
 
-  // Create new document
   const handleCreateDocument = async (e) => {
     e.preventDefault();
     if (!newDocTitle.trim()) return;
@@ -174,9 +182,8 @@ export default function App() {
     }
   };
 
-  // Delete document
   const handleDeleteDocument = async (docId, e) => {
-    e.stopPropagation(); // Prevent switching active document on delete click
+    e.stopPropagation();
     if (!confirm("Are you sure you want to permanently delete this document?")) return;
 
     try {
@@ -216,14 +223,12 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-slate-900 text-slate-100 overflow-hidden">
-      {/* Sidebar - Document List */}
       <aside className="w-64 bg-slate-950 border-r border-slate-800 flex flex-col p-4 space-y-4">
         <div className="flex items-center space-x-2 text-indigo-400 font-bold text-lg border-b border-slate-800 pb-3">
           <Folder className="w-5 h-5" />
           <span>Workspaces</span>
         </div>
 
-        {/* Create New Document Form */}
         <form onSubmit={handleCreateDocument} className="flex gap-2">
           <input
             type="text"
@@ -240,7 +245,6 @@ export default function App() {
           </button>
         </form>
 
-        {/* List of Documents */}
         <div className="flex-1 overflow-y-auto space-y-1">
           {documents.map((doc) => (
             <div
@@ -272,9 +276,7 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Main Workspace Area */}
       <div className="flex-1 flex flex-col p-6 space-y-4 overflow-y-auto">
-        {/* Header */}
         <header className="flex items-center justify-between bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-md">
           <div className="flex items-center space-x-3">
             <ShieldCheck className="w-8 h-8 text-emerald-400" />
@@ -289,6 +291,11 @@ export default function App() {
           </div>
 
           <div className="flex items-center space-x-3">
+            <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+              <Users className="w-3.5 h-3.5" />
+              {activeUsersCount} Active {activeUsersCount === 1 ? "Peer" : "Peers"}
+            </span>
+
             <span
               className={`px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 ${
                 isConnected
@@ -315,7 +322,6 @@ export default function App() {
           </div>
         </header>
 
-        {/* Editor Canvas */}
         <main className="bg-slate-800 rounded-xl border border-slate-700 p-6 shadow-xl flex-1 flex flex-col">
           <div className="flex items-center justify-between mb-4 border-b border-slate-700 pb-3 text-xs text-slate-400">
             <span className="flex items-center gap-1.5 text-emerald-400 font-medium">
@@ -330,7 +336,6 @@ export default function App() {
           />
         </main>
 
-        {/* Security Telemetry */}
         <footer className="bg-slate-950 rounded-xl border border-slate-800 p-4 space-y-2 font-mono text-xs">
           <div className="text-slate-400 font-sans font-semibold flex items-center justify-between">
             <span>Live Security Inspection (What the DB/Server Sees)</span>
